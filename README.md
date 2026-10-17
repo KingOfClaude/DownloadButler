@@ -9,6 +9,7 @@ It runs quietly in the background, supports configurable sorting rules, and can 
 - **Automatic sorting** — checks the selected folder every five seconds and sorts eligible files in the background.
 - **Manual sorting** — sort files immediately using the application window or system-tray menu.
 - **Custom sorting rules** — add, edit, and remove rules to control which file types go into which folders.
+- **Processors** — hand matching files to any external program (for example a converter or optimiser) before they are sorted. See [Processors](#processors).
 - **Duplicate filename protection** — avoids overwriting files by adding numbered suffixes, such as `report (1).pdf`.
 - **Partial-download protection** — skips common temporary download extensions, including `.crdownload`, `.part`, and `.tmp`.
 - **File-write protection** — automatic sorting skips files modified within the last three seconds.
@@ -51,11 +52,14 @@ Supported compiler options:
 
 Open an **x64 Native Tools Command Prompt for Visual Studio** or another suitable Visual Studio Developer Command Prompt.
 
-Save the source code as `DownloadButler.cpp`, navigate to its directory, and run:
+Navigate to the repository directory and run:
 
 ```bat
-cl /EHsc /std:c++17 /O2 DownloadButler.cpp /link /SUBSYSTEM:WINDOWS
+rc /nologo DownloadButler.rc
+cl /EHsc /std:c++17 /O2 DownloadButler.cpp DownloadButler.res /link /SUBSYSTEM:WINDOWS
 ```
+
+The first command compiles the application icon (`assets/DownloadButler.ico`) into a resource file that is linked into the executable.
 
 The resulting executable is `DownloadButler.exe`.
 
@@ -64,7 +68,8 @@ The resulting executable is `DownloadButler.exe`.
 Open a terminal where `g++` is available and run:
 
 ```bash
-g++ -std=c++17 -O2 -municode -mwindows DownloadButler.cpp -o DownloadButler.exe -lcomctl32 -lshell32 -lole32 -ladvapi32 -static
+windres DownloadButler.rc -O coff -o DownloadButler.res.o
+g++ -std=c++17 -O2 -municode -mwindows DownloadButler.cpp DownloadButler.res.o -o DownloadButler.exe -lcomctl32 -lcomdlg32 -lshell32 -lole32 -ladvapi32 -luuid -static
 ```
 
 The resulting executable is `DownloadButler.exe`.
@@ -97,7 +102,7 @@ This normally resolves to a path similar to:
 C:\Users\<YourUserName>\AppData\Roaming\DownloadButler\config.ini
 ```
 
-The configuration file contains the selected folder, automatic-sorting preference, and custom rules.
+The configuration file contains the selected folder, automatic-sorting preference, custom rules, and processors.
 
 Example:
 
@@ -105,6 +110,7 @@ Example:
 [General]
 DownloadFolder=C:\Users\Example\Downloads
 AutoSort=1
+ProcessorTimeoutSec=120
 
 [Rules]
 Count=2
@@ -112,7 +118,16 @@ Folder0=Images
 Exts0=jpg,jpeg,png,gif
 Folder1=Documents
 Exts1=pdf,doc,docx,txt
+
+[Processors]
+Count=1
+Exts0=webp
+Exe0=|C:\Program Files\ImageMagick\magick.exe|
+Args0=|"{file}" "{dir}\{name}.png"|
+Enabled0=1
 ```
+
+The `|` characters around a processor's program and arguments are written by the application (Windows would otherwise strip quotes from the value); keep them if you edit those lines by hand.
 
 The application manages this file automatically. It is generally best to edit rules through the application window rather than modifying the configuration manually while the application is running.
 
@@ -142,6 +157,49 @@ jpg,jpeg,png,webp
 Rules are processed in order, and **the first matching rule wins**. If two rules contain the same extension, the earlier rule takes precedence.
 
 A relative destination such as `Images` creates a subfolder inside the selected directory. An absolute destination path can be used to send files elsewhere.
+
+## Processors
+
+A **processor** hands a file to an external program. For example: whenever a `.webp` appears in your Downloads folder, run a converter on it.
+
+Open the **Processors** page in the main window and fill in:
+
+| Field | Meaning |
+| ----- | ------- |
+| **Extensions** | Which files the processor applies to (`webp`, or `png,jpg`). Same format as sorting rules. |
+| **Program to run** | The `.exe` to launch: a full path, or just a name if it is on your `PATH` (such as `magick.exe`). |
+| **Arguments** | What to pass to the program. Leave blank to pass just the file path. |
+
+Arguments can use these placeholders:
+
+| Placeholder | Replaced with | Example |
+| ----------- | ------------- | ------- |
+| `{file}` | Full path of the file | `C:\Users\You\Downloads\photo.webp` |
+| `{dir}` | Folder containing the file | `C:\Users\You\Downloads` |
+| `{name}` | File name without extension | `photo` |
+| `{ext}` | Extension without the dot | `webp` |
+
+Put quotes around placeholders that might contain spaces. For example, to convert WebP images to PNG with ImageMagick:
+
+```text
+Extensions: webp
+Program:    C:\Program Files\ImageMagick\magick.exe
+Arguments:  "{file}" "{dir}\{name}.png"
+```
+
+The resulting `photo.png` appears in the Downloads folder and is then sorted by your normal rules, like any other download. Use the checkbox beside a processor to switch it off without deleting it.
+
+### How processors run
+
+- **Before sorting.** The program receives the file where it was downloaded; afterwards the file is sorted as usual.
+- **All matches run.** Unlike sorting rules (first match wins), every enabled processor that matches a file runs, one after another, in list order.
+- **In the background.** Programs run on a separate thread, so a slow converter never freezes the tray app. Console windows are not shown.
+- **Once per file.** A file that stays in the folder (because no sorting rule matches it) is not reprocessed every five seconds; it is processed again only if it changes. Restarting Butler forgets this, so such files are processed once more after a restart.
+- **Success means exit code 0.** If a program exits with any other code, can't be started, or runs longer than the timeout (120 seconds), the file is **left where it is** (not sorted), a tray notification explains why, and Butler does not retry until the file changes.
+- **Programs that delete or rename the file** are fine: Butler notices the file is gone and moves on.
+- **Scripts.** Only `.exe` programs are accepted directly, because batch files interpret special characters in file names. To run a script, point the processor at its interpreter, e.g. Program `powershell.exe`, Arguments `-NoProfile -File "C:\Scripts\handle.ps1" "{file}"`.
+
+The timeout can be changed with `ProcessorTimeoutSec` in the config file.
 
 ## Automatic Sorting Behaviour
 
@@ -187,6 +245,10 @@ Check that the selected folder exists, automatic sorting is enabled, and the fil
 
 Files without a matching rule, files with unsupported extensions, and certain temporary downloads are intentionally left in place.
 
+**A file isn't being sorted and a notification said a processor failed**
+
+A processor exited with an error, couldn't be started, or timed out, so the file was deliberately left in place. Check the program path and arguments on the Processors page. Butler tries again when the file changes, or after you restart it.
+
 **A file has a numbered suffix**
 
 A file with the same name already exists in the destination folder. Butler uses a numbered filename to avoid overwriting it.
@@ -201,6 +263,7 @@ Check that the application can write to your roaming application-data directory 
 - File extensions determine the destination folder, so files with misleading extensions may be sorted incorrectly.
 - The three-second settling check reduces the chance of moving an active download but cannot guarantee that every download has finished.
 - Moving or copying files can fail if permissions, file locks, disk space, or filesystem boundaries prevent the operation.
+- Processors run arbitrary programs on files you downloaded, which may be untrusted. Only point them at tools you trust, and remember that a processor can modify or delete the files it is given.
 - The application does not currently provide an undo function or a log of individual file movements. Consider backing up important files before using it on a large folder.
 - Custom absolute destination paths should be checked carefully before sorting.
 - Files in subdirectories are not processed automatically.
@@ -214,6 +277,10 @@ Creative Commons Zero v1.0 Universal
 ```text
 DownloadFolderButler/
 ├── DownloadButler.cpp
+├── DownloadButler.rc        # Embeds the app icon
+├── resource.h
+├── assets/
+│   └── DownloadButler.ico
 ├── DownloadButler.exe       # Generated when compiled
 ├── README.md
 └── LICENSE                  # Optional; add before distribution
